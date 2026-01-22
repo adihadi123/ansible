@@ -1,0 +1,21 @@
+- name: Destroy lab VMs
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    vms:
+      - lab-vm1
+      - lab-vm2
+      - lab-vm3
+
+  tasks:
+    - name: Destroy VMs (ignore errors)
+      command: "virsh destroy {{ item }}"
+      loop: "{{ vms }}"
+      ignore_errors: true
+
+    - name: Undefine VMs and remove storage (ignore errors)
+      command: "virsh undefine {{ item }} --remove-all-storage --nvram"
+      loop: "{{ vms }}"
+      ignore_errors: true

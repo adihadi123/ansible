@@ -1,0 +1,165 @@
+- name: Provision 3 libvirt VMs on the control node
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    base_image: "{{ playbook_dir }}/../images/jammy-server-cloudimg-amd64.img"
+    disks_dir: "{{ playbook_dir }}/../disks"
+    cloudinit_dir: "{{ playbook_dir }}/../cloudinit"
+    inventory_path: "{{ playbook_dir }}/../inventory/hosts.ini"
+
+    vm_user: ubuntu
+    ssh_pubkey: "{{ lookup('file', lookup('env','HOME') + '/.ssh/id_ed25519_ansible.pub') }}"
+
+    libvirt_network: default
+
+    vms:
+      - name: lab-vm1
+        ram_mb: 2048
+        vcpus: 2
+        disk_gb: 12
+      - name: lab-vm2
+        ram_mb: 2048
+        vcpus: 2
+        disk_gb: 12
+      - name: lab-vm3
+        ram_mb: 2048
+        vcpus: 2
+        disk_gb: 12
+
+  tasks:
+    - name: Ensure directories exist
+      file:
+        path: "{{ item }}"
+        state: directory
+        mode: "2775"
+      loop:
+        - "{{ disks_dir }}"
+        - "{{ cloudinit_dir }}"
+        - "{{ playbook_dir }}/../inventory"
+
+    - name: Verify base image exists
+      stat:
+        path: "{{ base_image }}"
+      register: base_img
+
+    - name: Fail if base image missing
+      fail:
+        msg: "Base image not found at {{ base_image }}"
+      when: not base_img.stat.exists
+
+    - name: Ensure libvirt network is active
+      command: "virsh net-info {{ libvirt_network }}"
+      register: net_info
+      changed_when: false
+
+    - name: Create per-VM disks (qcow2 overlay)
+      command: >
+        qemu-img create -f qcow2
+        -F qcow2 -b "{{ base_image }}"
+        "{{ disks_dir }}/{{ item.name }}.qcow2"
+        "{{ item.disk_gb }}G"
+      args:
+        creates: "{{ disks_dir }}/{{ item.name }}.qcow2"
+      loop: "{{ vms }}"
+
+    - name: Ensure per-VM cloud-init directories exist
+      file:
+        path: "{{ cloudinit_dir }}/{{ item.name }}"
+        state: directory
+        mode: "2775"
+      loop: "{{ vms }}"
+
+    - name: Write cloud-init user-data
+      template:
+        src: "{{ playbook_dir }}/../templates/user-data.yml.j2"
+        dest: "{{ cloudinit_dir }}/{{ item.name }}/user-data"
+        mode: "0644"
+      loop: "{{ vms }}"
+      vars:
+        vm_name: "{{ item.name }}"
+
+    - name: Write cloud-init meta-data
+      template:
+        src: "{{ playbook_dir }}/../templates/meta-data.yml.j2"
+        dest: "{{ cloudinit_dir }}/{{ item.name }}/meta-data"
+        mode: "0644"
+      loop: "{{ vms }}"
+      vars:
+        vm_name: "{{ item.name }}"
+
+    - name: Create cloud-init ISO
+      command: >
+        cloud-localds
+        "{{ cloudinit_dir }}/{{ item.name }}.iso"
+        "{{ cloudinit_dir }}/{{ item.name }}/user-data"
+        "{{ cloudinit_dir }}/{{ item.name }}/meta-data"
+      args:
+        creates: "{{ cloudinit_dir }}/{{ item.name }}.iso"
+      loop: "{{ vms }}"
+
+    - name: Define and start VMs
+      command: >
+        virt-install
+        --name "{{ item.name }}"
+        --memory "{{ item.ram_mb }}"
+        --vcpus "{{ item.vcpus }}"
+        --disk path="{{ disks_dir }}/{{ item.name }}.qcow2",format=qcow2,bus=virtio
+        --disk path="{{ cloudinit_dir }}/{{ item.name }}.iso",device=cdrom
+        --os-variant ubuntu22.04
+        --network network="{{ libvirt_network }}",model=virtio
+        --graphics none
+        --noautoconsole
+        --import
+      args:
+        creates: "/etc/libvirt/qemu/{{ item.name }}.xml"
+      loop: "{{ vms }}"
+
+    # --- NEW: MAC -> IP (reliable) ---
+    - name: Get MAC address of each VM interface
+      command: >
+        bash -lc "virsh domiflist {{ item.name }} | awk '/network/ {print $5; exit}'"
+      register: mac_result
+      changed_when: false
+      loop: "{{ vms }}"
+
+    - name: Gather VM IPs from libvirt DHCP leases (by MAC)
+      command: >
+        bash -lc "virsh net-dhcp-leases {{ libvirt_network }} | awk 'tolower($0) ~ tolower(\"{{ item.stdout }}\") {print $5; exit}' | cut -d/ -f1"
+      register: ip_result
+      changed_when: false
+      loop: "{{ mac_result.results }}"
+      retries: 60
+      delay: 3
+      until: ip_result.stdout | length > 0
+
+    - name: Build inventory content
+      set_fact:
+        inventory_content: |
+          [lab]
+          {% for i in range(vms | length) %}
+          {{ vms[i].name }} ansible_host={{ ip_result.results[i].stdout | trim }} ansible_user={{ vm_user }}
+          {% endfor %}
+
+          [web]
+          {{ vms[0].name }}
+
+          [app]
+          {{ vms[1].name }}
+
+          [misc]
+          {{ vms[2].name }}
+
+    - name: Write inventory
+      copy:
+        dest: "{{ inventory_path }}"
+        content: "{{ inventory_content }}"
+        mode: "0644"
+
+    - name: Wait for SSH on all VMs
+      wait_for:
+        host: "{{ item.stdout | trim }}"
+        port: 22
+        timeout: 600
+      loop: "{{ ip_result.results }}"

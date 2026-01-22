@@ -1,0 +1,5 @@
+- name: Ping all lab nodes
+  hosts: lab
+  gather_facts: false
+  tasks:
+    - ansible.builtin.ping:

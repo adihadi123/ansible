@@ -1,0 +1,8 @@
+---
+- name: Install monitoring tools
+  ansible.builtin.apt:
+    name:
+      - net-tools
+      - tcpdump
+      - ncdu
+    state: present

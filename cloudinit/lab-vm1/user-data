@@ -1,0 +1,23 @@
+#cloud-config
+users:
+  - name: ubuntu
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    shell: /bin/bash
+    ssh_authorized_keys:
+      - ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKk07a3m7v/UA+pFUjyvXdghYNpGyIbdQ2Yxo6EZzv6u ansible-lab
+
+ssh_pwauth: false
+disable_root: true
+
+package_update: true
+package_upgrade: false
+packages:
+  - openssh-server
+  - qemu-guest-agent
+  - python3
+
+runcmd:
+  - systemctl enable --now ssh || true
+  - systemctl restart ssh || true
+  - systemctl enable --now qemu-guest-agent || true
+  - netplan apply || true
